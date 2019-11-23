@@ -74,7 +74,7 @@ class CategoryCode(IntEnum):
 
 class Tokenizer:
 
-    def __init__(self, text=None, endlinechar='\r'):
+    def __init__(self, text=None, endlinechar=13):
         # caracters not registered in catcodes get a code 12 (Other)
         self.catcodes = defaultdict(lambda: CategoryCode.Other)
         # register defaults
@@ -104,11 +104,7 @@ class Tokenizer:
         self.reset(text)
 
     def __iter__(self):
-        while True:
-            token = self.next()
-            if token is None:
-                break
-            yield token
+        return self.tokens()
 
     def reset(self, text=None):
         """Resets the tokenizer with optional new input text."""
@@ -135,6 +131,13 @@ class Tokenizer:
                 if self.endlinechar is not None:
                     line += self.endlinechar
                 yield line
+
+    def tokens(self):
+        while True:
+            token = self.next()
+            if token is None:
+                break
+            yield token
 
     def next(self):
         if self.next_token is None:
