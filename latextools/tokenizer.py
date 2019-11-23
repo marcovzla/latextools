@@ -1,3 +1,4 @@
+import re
 from enum import IntEnum
 from collections import namedtuple, defaultdict
 from string import ascii_letters
@@ -8,13 +9,20 @@ Token = namedtuple('Token', 'value code')
 
 
 
+class State(IntEnum):
+    NewLine = 0
+    SkippingSpaces = 1
+    MiddleOfLine = 2
+
+
+
 class CategoryCode(IntEnum):
     # Escape character; this signals the start of a control sequence.
     # IniTeX makes the backslash \ (code 92) an escape character.
-    Escape = 0
+    EscapeCharacter = 0
     # Beginning of group; such a character causes TeX to enter a new level of grouping.
     # The plain format makes the open brace { a beginning-of-group character.
-    StartOfGroup = 1
+    BegginingOfGroup = 1
     # End of group; TeX closes the current level of grouping.
     # Plain TeX has the closing brace } as end-of-group character.
     EndOfGroup = 2
@@ -23,13 +31,13 @@ class CategoryCode(IntEnum):
     MathShift = 3
     # Alignment tab; the column (row) separator in tables made with \halign (\valign).
     # In plain TeX this is the ampersand &.
-    Alignment = 4
+    AlignmentTab = 4
     # End of line; a character that TeX considers to signal the end of an input line.
     # IniTeX assigns this code to the <return>, that is, code 13.
     EndOfLine = 5
     # Parameter character; this indicates parameters for macros.
     # In plain TeX this is the hash sign.
-    Parameter = 6
+    ParameterCharacter = 6
     # Superscript; this precedes superscript expressions in math mode.
     # It is also used to denote character codes that cannot be entered in an input file.
     # In plain TeX this is the circumflex ^.
@@ -59,36 +67,25 @@ class CategoryCode(IntEnum):
     # IniTeX assigns the ASCII <delete> character, code 127, to this category.
     Invalid = 15
 
+    ControlSequence = 16
+    ParameterToken = 17
 
 
-class LatexTokenizer:
-    # TeX's input processor can be considered to be a finite state automaton with three internal
-    # states, that is, at any moment in time it is in one of three states, and after transition to
-    # another state there is no memory of the previous states.
 
-    # State N is entered at the beginning of each new input line, and that is the only time TeX is in this state.
-    # In state N all space tokens (that is, characters of category 10) are ignored; an end-of-line character is converted into a \par token.
-    # All other tokens bring TeX into state M.
+class Tokenizer:
 
-    # State S is entered in any mode after a control word or control space (but after no other control symbol), or, when in state M, after a space.
-    # In this state all subsequent spaces or end-of-line characters in this input line are discarded.
-
-    # By far the most common state is M, 'middle of line'.
-    # It is entered after characters of categories 1–4, 6–8, and 11–13, and after control symbols other than control space.
-    # An end-of-line character encountered in this state results in a space token.
-
-    def __init__(self, text=None):
-        # caracters not registered in the category_codes look-up table get a code 12 (Other)
-        self.category_codes = defaultdict(lambda: CategoryCode.Other)
+    def __init__(self, text=None, endlinechar='\r'):
+        # caracters not registered in catcodes get a code 12 (Other)
+        self.catcodes = defaultdict(lambda: CategoryCode.Other)
         # register defaults
-        self.category_codes.update({
-            '\\':   CategoryCode.Escape,
-            '{' :   CategoryCode.StartOfGroup,
+        self.catcodes.update({
+            '\\':   CategoryCode.EscapeCharacter,
+            '{' :   CategoryCode.BegginingOfGroup,
             '}' :   CategoryCode.EndOfGroup,
             '$' :   CategoryCode.MathShift,
-            '&' :   CategoryCode.Alignment,
-            '\n':   CategoryCode.EndOfLine,
-            '#' :   CategoryCode.Parameter,
+            '&' :   CategoryCode.AlignmentTab,
+            '\r':   CategoryCode.EndOfLine,
+            '#' :   CategoryCode.ParameterCharacter,
             '^' :   CategoryCode.Superscript,
             '_' :   CategoryCode.Subscript,
             '\0':   CategoryCode.Ignored,
@@ -100,106 +97,153 @@ class LatexTokenizer:
         })
         # register ascii letters
         for c in ascii_letters:
-            self.category_codes[c] = CategoryCode.Letter
+            self.catcodes[c] = CategoryCode.Letter
+        # set default endlinechar
+        self.set_endlinechar(endlinechar)
         # reset tokenizer
         self.reset(text)
 
     def __iter__(self):
-        while self.has_token():
-            yield self.get_token()
+        while True:
+            token = self.next()
+            if token is None:
+                break
+            yield token
 
     def reset(self, text=None):
         """Resets the tokenizer with optional new input text."""
+        self.state = State.NewLine
+        self.currline = 0
+        self.currchar = 0
+        self.next_token = None
         if text is not None:
-            self.text = text
-            self.chars = list(text)
-        self.state = 'N'
-        self.idx = 0
+            self.text = text.strip()
+            self.lines = list(self.lines())
 
-    def register_category_code(self, char, code):
-        """Register a category code for a given character."""
-        self.category_codes[char] = code
+    def set_endlinechar(self, char):
+        if isinstance(char, str) and len(char) == 1 and 0 <= ord(char) < 255:
+            self.endlinechar = char
+        elif isinstance(char, int) and 0 <= char < 255:
+            self.endlinechar = chr(char)
+        else:
+            self.endlinechar = None
 
-    def unregister_category_code(self, char):
-        """Removes character from category_codes table."""
-        if char in self.category_codes:
-            del self.category_codes[char]
+    def lines(self):
+        if self.text is not None:
+            for line in self.text.splitlines():
+                line = line.rstrip()
+                if self.endlinechar is not None:
+                    line += self.endlinechar
+                yield line
 
-    def has_token(self):
-        """Returns True if there is at least one more token."""
-        return self.idx < len(self.chars)
+    def next(self):
+        if self.next_token is None:
+            token = self.make_token()
+        else:
+            token = self.next_token
+            self.next_token = None
+        return token
 
-    def get_token(self):
-        """Returns a (token, code) tuple, or None if there are no more tokens."""
-        while self.has_token():
-            token = self.chars[self.idx]
-            code = self.category_codes[token]
-            self.idx += 1
-            if code == CategoryCode.Escape and self.has_token():
-                next_char = self.chars[self.idx]
-                next_code = self.category_codes[next_char]
-                self.idx += 1
-                if next_code == CategoryCode.Letter:
-                    # An escape character -- that is, a character of category 0 -- followed by a string of ‘letters’
-                    # is lumped together into a control word, which is a single token.
-                    self.state = 'S'
-                    token += next_char
-                    while self.has_token():
-                        next_char = self.chars[self.idx]
-                        next_code = self.category_codes[next_char]
-                        if next_code == CategoryCode.Letter:
-                            token += next_char
-                            self.idx += 1
-                        else:
-                            break
-                elif next_code == CategoryCode.Space:
-                    # The control symbol that results from an escape character followed by a space character is called control space.
-                    self.state = 'S'
-                    token += next_char
-                else:
-                    # An escape character followed by a single character that is not of category 11, letter, is made into a control symbol.
-                    self.state = 'M'
-                    token += next_char
-                code = None
-            if code == CategoryCode.EndOfLine:
-                # handle a new line according to the current state
-                if self.state == 'M':
-                    self.state = 'N'
-                    token = ' '
-                    code = CategoryCode.Space
-                elif self.state == 'N':
-                    token = '\\par'
-                    code = None
-                elif self.state == 'S':
-                    self.state = 'N'
-                    continue
-            elif code == CategoryCode.Parameter and self.chars[self.idx].isdigit():
-                # Parameter tokens: a parameter character -- that is, a character of category 6, by default -- followed by a digit 1..9
-                # is replaced by a parameter token.
-                token += self.chars[self.idx]
-                self.idx += 1
-                self.state = 'M'
-                code = None
-            elif code == CategoryCode.Space:
-                # handle spaces according to the current state
-                if self.state in ('N', 'S'):
-                    continue
-                else:
-                    self.state = 'S'
-            elif code == CategoryCode.Comment:
-                # discard tokens until the end of line
-                while self.has_token():
-                    next_char = self.chars[self.idx]
-                    next_code = self.category_codes[next_char]
-                    self.idx += 1
-                    if next_code == CategoryCode.EndOfLine:
-                        self.state = 'N'
+    def peek(self):
+        if self.next_token is None:
+            self.next_token = self.make_token()
+        return self.next_token
+
+    def make_token(self):
+        while self.currline < len(self.lines):
+            # get current line
+            line = self.lines[self.currline]
+            while self.currchar < len(line):
+                # get current char
+                char = line[self.currchar]
+                code = self.catcodes[char]
+                self.currchar += 1
+                # start a token
+                token = char
+                if code == CategoryCode.EscapeCharacter:
+                    char = line[self.currchar]
+                    code = self.catcodes[char]
+                    self.currchar += 1
+                    if code == CategoryCode.Letter:
+                        # control word
+                        self.state = State.SkippingSpaces
+                        token += char
+                        while self.currchar < len(line):
+                            char = line[self.currchar]
+                            code = self.catcodes[char]
+                            if code == CategoryCode.Letter:
+                                token += char
+                                self.currchar += 1
+                            else:
+                                break
+                    elif code == CategoryCode.Space:
+                        # control space
+                        self.state = State.SkippingSpaces
+                        token += char
+                    else:
+                        # control symbol
+                        self.state = State.MiddleOfLine
+                        token += char
+                    return Token(token, CategoryCode.ControlSequence)
+                elif code == CategoryCode.EndOfLine:
+                    # skip rest of current line
+                    self.currline += 1
+                    self.currchar = 0
+                    # remember state
+                    prev_state = self.state
+                    # transition to new state
+                    self.state = State.NewLine
+                    if prev_state == State.NewLine:
+                        return Token('\\par', CategoryCode.ControlSequence)
+                    elif prev_state == State.SkippingSpaces:
                         break
-                continue
-            elif code in (CategoryCode.StartOfGroup, CategoryCode.EndOfGroup,
-                          CategoryCode.MathShift, CategoryCode.Alignment,
-                          CategoryCode.Parameter, CategoryCode.Superscript,
-                          CategoryCode.Subscript, CategoryCode.Letter,
-                          CategoryCode.Other, CategoryCode.Active):
-                self.state = 'M'
-            return Token(token, code)
+                    elif prev_state == State.MiddleOfLine:
+                        return Token(' ', CategoryCode.Space)
+                elif code == CategoryCode.ParameterCharacter:
+                    if self.currchar < len(line):
+                        char = line[self.currchar]
+                        if char.isdigit():
+                            # build a parameter token
+                            token += char
+                            code = CategoryCode.ParameterToken
+                            self.currchar += 1
+                        elif self.catcodes[char] == CategoryCode.ParameterCharacter:
+                            # ignore second parameter char
+                            self.currchar += 1
+                    self.state = State.MiddleOfLine
+                    return Token(token, code)
+                elif code == CategoryCode.Superscript:
+                    self.state = State.MiddleOfLine
+                    chars = line[self.currchar:self.currchar+3]
+                    if len(chars) > 1 and self.catcodes[chars[0]] == CategoryCode.Superscript:
+                        enc = chars[1:]
+                        if re.match(r'[0-9a-f][0-9a-f]', enc):
+                            n = int(enc, 16)
+                            if 0 <= n < 256:
+                                token = chr(n)
+                                code = self.catcodes[token]
+                                self.currchar += 3
+                                return Token(token, code)
+                            n = ord(enc[0])
+                            if 0 <= n < 128:
+                                token = chr((n + 64) % 128)
+                                code = self.catcodes[token]
+                                self.currchar += 2
+                                return Token(token, code)
+                    return Token(token, code)
+                elif code == CategoryCode.Ignored:
+                    pass
+                elif code == CategoryCode.Space:
+                    if self.state == State.MiddleOfLine:
+                        self.state = State.SkippingSpaces
+                        return Token(' ', CategoryCode.Space)
+                elif code == CategoryCode.Comment:
+                    # skip rest of current line
+                    self.currline += 1
+                    self.currchar = 0
+                    break
+                elif code == CategoryCode.Invalid:
+                    raise Exception('invalid character')
+                else:
+                    self.state = State.MiddleOfLine
+                    return Token(token, code)
