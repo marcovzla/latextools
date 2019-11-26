@@ -22,7 +22,7 @@ class CategoryCode(IntEnum):
     EscapeCharacter = 0
     # Beginning of group; such a character causes TeX to enter a new level of grouping.
     # The plain format makes the open brace { a beginning-of-group character.
-    BegginingOfGroup = 1
+    BeginningOfGroup = 1
     # End of group; TeX closes the current level of grouping.
     # Plain TeX has the closing brace } as end-of-group character.
     EndOfGroup = 2
@@ -80,7 +80,7 @@ class Tokenizer:
         # register defaults
         self.catcodes.update({
             '\\':   CategoryCode.EscapeCharacter,
-            '{' :   CategoryCode.BegginingOfGroup,
+            '{' :   CategoryCode.BeginningOfGroup,
             '}' :   CategoryCode.EndOfGroup,
             '$' :   CategoryCode.MathShift,
             '&' :   CategoryCode.AlignmentTab,
@@ -104,7 +104,8 @@ class Tokenizer:
         self.reset(text)
 
     def __iter__(self):
-        return self.tokens()
+        while self.has_token():
+            yield self.get_token()
 
     def reset(self, text=None):
         """Resets the tokenizer with optional new input text."""
@@ -132,25 +133,21 @@ class Tokenizer:
                     line += self.endlinechar
                 yield line
 
-    def tokens(self):
-        while True:
-            token = self.next()
-            if token is None:
-                break
-            yield token
+    def peek(self):
+        if self.next_token is None:
+            self.next_token = self.make_token()
+        return self.next_token
 
-    def next(self):
+    def has_token(self):
+        return self.peek() is not None
+
+    def get_token(self):
         if self.next_token is None:
             token = self.make_token()
         else:
             token = self.next_token
             self.next_token = None
         return token
-
-    def peek(self):
-        if self.next_token is None:
-            self.next_token = self.make_token()
-        return self.next_token
 
     def make_token(self):
         while self.currline < len(self.lines):
